@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  mnemonic-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces/${localWorkspaceFolderBasename}:cached
+    environment:
+      - RUST_LOG=debug
+      - MRE_DATA_PATH=/workspaces/${localWorkspaceFolderBasename}/data
+      - MRE_ENABLE_METRICS=false
