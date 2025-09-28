@@ -6,3 +6,7 @@ pub mod transaction;
 pub mod security;
 pub mod types;
 pub mod utils;
+pub mod error;
+pub mod storage;
+
+pub use error::{MnemonicError, Result};
