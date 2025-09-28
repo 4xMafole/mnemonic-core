@@ -159,4 +159,26 @@ impl RocksBackend {
 
         Ok(relationships)
     }
+
+    /// Delete a relationship AND its index entries atomically.
+    pub fn delete_ralationship(&self, id: &RelationshipId) -> Result<()> {
+        let cf_rels = self.db.cf_handle(CF_RELATIONSHIPS).unwrap();
+        let cf_indices = self.db.cf_handle(CF_INDICES).unwrap();
+
+        // First, we need to get the relationship to know its source/target for index deletion.
+        if let Some(rel) = self.get_relationship(id)? {
+            let mut batch = WriteBatch::default();
+
+            // Delete the main relationship data.
+            batch.delete_cf(&cf_rels, format!("rel:{}", id));
+
+            // Delete the index entries.
+            batch.delete_cf(&cf_indices, format!("idx_src::{}:{}", rel.source, rel.id));
+            batch.delete_cf(&cf_indices, format!("idx_tgt::{}:{}", rel.target, rel.id));
+
+            self.db.write(batch)?;
+        }
+
+        Ok(())
+    }
 }
