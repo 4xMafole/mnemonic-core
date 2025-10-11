@@ -11,11 +11,18 @@ pub enum MnemonicError {
 
     #[error("Concept not found: {0}")]
     ConceptNotFound(Uuid),
-    
+
     #[error("Relationship not found: {0}")]
     RelationshipNotFound(Uuid),
 
-    // ... we can add more specific errors later
+    #[error("Transaction error: {0}")]
+    Transaction(String),
+
+    #[error("Transaction conflict: {0}")]
+    TransactionConflict(String),
+
+    #[error("Index error: {0}")]
+    Index(String),
 }
 
 // This creates a handy shortcut for our functions.
