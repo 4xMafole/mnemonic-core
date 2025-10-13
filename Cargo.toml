@@ -32,6 +32,13 @@ thiserror = "2.0.16"
 tracing = "0.1"
 tracing-subscriber ={ version = "0.3", features =["env-filter"]}
 
+# --- Web API Layer ---
+# Axum is our high-performance web framework.
+axum = "0.8.6"
+# Tower-http provides useful middleware, like for logging.
+tower-http = { version = "0.6.6", features = ["trace", "cors"] }
+
+
 [dev-dependencies]
 #This section is ONLY for code needed for testing.
 #A popular framework for writing benchmarks.
