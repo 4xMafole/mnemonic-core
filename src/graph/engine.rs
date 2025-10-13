@@ -2,8 +2,10 @@ use serde_json;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::task;
+use uuid::Uuid;
 
 use crate::error::{MnemonicError, Result};
+use super::transaction::{Transaction, TransactionId, TransactionManager, IsolationLevel};
 use crate::storage::RocksBackend;
 use crate::types::{
     concept::{Concept, ConceptId},
@@ -11,9 +13,11 @@ use crate::types::{
 };
 
 /// High-level graph engine that provides the core Mnemoninc Computing primities
+#[derive(Debug)]
 pub struct GraphEngine {
     // We hold the backend inside an Arc so we can share it safely
     // across multiple concurrent operations.
+    transaction_manager: Arc<TransactionManager>,
     backend: Arc<RocksBackend>,
 }
 
@@ -21,10 +25,12 @@ impl GraphEngine {
     /// Create a new GraphEngine instance with the specified storage path.
     pub fn new(storage_path: &Path) -> Result<Self> {
         // Initialize the low-level backend.
-        let backend = RocksBackend::new(storage_path)?;
+        let backend = Arc::new(RocksBackend::new(storage_path)?);
+        let transaction_manager = TransactionManager::new(Arc::clone(&backend));
         // Wrap it in an Arc and store it.
         Ok(Self {
-            backend: Arc::new(backend),
+            transaction_manager: Arc::new(transaction_manager),
+            backend,
         })
     }
 
@@ -95,5 +101,48 @@ impl GraphEngine {
         task::spawn_blocking(move || backend.get_relationships_by_source(&source_id))
             .await
             .unwrap()
+    }
+
+    /// Begin a new transaction
+    pub async fn begin_transaction(&self, isolation_level: IsolationLevel) -> Result<Transaction> {
+        let manager = Arc::clone(&self.transaction_manager);
+        task::spawn_blocking(move || {
+            manager.begin_transaction(isolation_level)
+        }).await.unwrap() // This unwrap can be improved later
+    }
+
+    /// Commit a transaction
+    pub async fn commit_transaction(&self, transaction: Transaction) -> Result<()> {
+        let manager = Arc::clone(&self.transaction_manager);
+        task::spawn_blocking(move || {
+            manager.commit_transaction(transaction)
+        }).await.unwrap()
+    }
+
+    /// Abort a transaction
+    pub async fn abort_transaction(&self, transaction_id: Uuid) -> Result<()> {
+        let manager = Arc::clone(&self.transaction_manager);
+        task::spawn_blocking(move || {
+            manager.abort_transaction(transaction_id)
+        }).await.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::graph::IsolationLevel;
+
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_engine_transaction_lifecycle() {
+        let dir = tempdir().unwrap();
+        let engine = GraphEngine::new(dir.path()).unwrap();
+        
+        let txn = engine.begin_transaction(IsolationLevel::Snapshot).await.unwrap();
+        let txn_id = txn.id;
+
+        engine.abort_transaction(txn_id).await.unwrap();
     }
 }

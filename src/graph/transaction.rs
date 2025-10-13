@@ -1,13 +1,13 @@
-use chrono::{DateTime, Utc};
-use std::collections::{HashMap, HashSet};
-use std::fmt::format;
-use std::sync::{Arc, RwLock};
-use uuid::Uuid;
-
 use super::versioning::VersionStore;
+use crate::storage::RocksBackend;
 use crate::types::concept::{Concept, ConceptId, ConceptVersion};
 use crate::types::relationship::{Relationship, RelationshipId};
 use crate::{MnemonicError, Result};
+use chrono::{DateTime, Utc};
+use rocksdb::WriteBatch;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+use uuid::Uuid;
 
 /// A unique ID for a transaction.
 pub type TransactionId = Uuid;
@@ -60,20 +60,22 @@ impl Transaction {
 }
 
 /// TransactionManager orchestrates all transactions and handles MVCC.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TransactionManager {
     // It holds a reference to the VersionStore to read history and write new versions.
     version_store: Arc<VersionStore>,
-
+    // Stores data to rocksdb
+    backend: Arc<RocksBackend>,
     // A thread-safe map of all currently active, uncommitted transactions.
     active_transactions: RwLock<HashMap<TransactionId, Transaction>>,
 }
 
 impl TransactionManager {
     /// Creates a new, empty TransactionManager.
-    pub fn new() -> Self {
+    pub fn new(backend: Arc<RocksBackend>) -> Self {
         Self {
             version_store: Arc::new(VersionStore::new()),
+            backend,
             active_transactions: RwLock::new(HashMap::new()),
         }
     }
@@ -119,18 +121,33 @@ impl TransactionManager {
         // Before we do anything, check for conflicts with other committed changes.
         self.validate_transaction(&transaction)?;
 
-        // --- PHASE 2: APPLY CHANGES ---
-        // If validation passes, we can safely apply the changes.
-        // We are going to "fake" the writes for now. We will write to the in-memory
-        // VersionStore but NOT to RocksDB. That's our next big step.
+        // --- PHASE 2: PERSISTENCE & APPLY CHANGES ---
+        let mut batch = WriteBatch::default(); //1. Create a new atomic batch
 
         // Loop through all the "pending writes" in our transaction's shopping cart.
-        for (_concept_id, concept) in transaction.pending_writes {
-            let new_version = ConceptVersion::from_concept(&concept, transaction.id);
-            self.version_store.add_concept_version(new_version);
+        for (concept_id, pending_concept) in transaction.pending_writes {
+            // 1. Get the last known version from the in-memory store.
+            let last_version = self
+                .version_store
+                .get_concept_version_at_timestamp(&concept_id, transaction.start_timestamp)?;
+
+            // 2. Calculate the next version number
+            let next_version_num = last_version.map_or(1, |v| v.version + 1);
+
+            // 3. Create the new version with the correct number.
+            let new_version =
+                ConceptVersion::from_concept(&pending_concept, transaction.id, next_version_num);
+
+            // 4. Prepare for durable write and update in-memory store.
+            self.backend
+                .store_concept_version(&new_version, &mut batch)?;
+            self.version_store.add_concept_version(new_version)?;
         }
 
         // We would also apply pending deletes and relationship changes here...
+
+        // write the entire batch to disk, atomically.
+        self.backend.db.write(batch)?;
 
         // --- PHASE 3: CLEANUP ---
         // The commit was successful. Remove the transaction from the active list.
@@ -170,15 +187,18 @@ impl TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::concept::ConceptData;
+    use crate::types::concept::{ConceptData, ConceptMetadata};
     use serde_json::json;
     use std::thread;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn test_transaction_lifecycle() {
         //1. Setup
-        let manager = TransactionManager::new();
+        let dir = tempdir().unwrap();
+        let backend = Arc::new(RocksBackend::new(dir.path()).unwrap());
+        let manager = TransactionManager::new(Arc::clone(&backend));
 
         //2. Begin transaction
         let txn = manager.begin_transaction(IsolationLevel::Snapshot).unwrap();
@@ -195,7 +215,7 @@ mod tests {
         //4. Abort transaction
         manager.abort_transaction(txn.id).unwrap();
 
-        //5. Verify About
+        //5. Verify Abort
         // Perform our final check in another separate block.
         {
             let active_ids_after_abort = manager.active_transactions.read().unwrap();
@@ -205,11 +225,95 @@ mod tests {
 
     #[test]
     fn test_first_committer_wins_conflict() {
-        //1. Setup
-        let manager = TransactionManager::new();
+        // --- 1. SETUP ---
+        // Create a backend directly for our test, so we can peek into it.
+        let dir = tempdir().unwrap();
+        let backend = Arc::new(RocksBackend::new(dir.path()).unwrap());
+        let manager = TransactionManager::new(Arc::clone(&backend));
 
-        // Let's create one initial concept to fight over.
-        let concept_to_update = Concept::new(json!({"value": "initial"}));
-        let concept_id = concept_to_update.id;
+        // --- 2. CREATE INITIAL STATE (The Correct Way) ---
+        // Let's create our initial concept inside a transaction and commit it.
+        let concept_id;
+        {
+            let mut initial_txn = manager.begin_transaction(IsolationLevel::Snapshot).unwrap();
+            let concept_to_create = Concept::new(json!({"value": "initial"}));
+            concept_id = concept_to_create.id; // Save the ID
+
+            initial_txn.write_set.insert(concept_id);
+            initial_txn
+                .pending_writes
+                .insert(concept_id, concept_to_create);
+
+            // This commit writes the INITIAL version (version 1) to RocksDB and in-memory store.
+            manager.commit_transaction(initial_txn).unwrap();
+        }
+
+        // --- 2. THE RACE BEGINS ---
+
+        // Alice starts her transaction.
+        let mut alice_txn = manager.begin_transaction(IsolationLevel::Snapshot).unwrap();
+
+        // Bob starts his transaction right after. His view of the world is the same as Alice's.
+        let mut bob_txn = manager.begin_transaction(IsolationLevel::Snapshot).unwrap();
+
+        // --- 4. ALICE WINS THE RACE ---
+        {
+            // Alice needs to read the concept first to modify it.
+            let concept_for_alice = manager
+                .version_store
+                .get_concept_version_at_timestamp(&concept_id, alice_txn.start_timestamp)
+                .unwrap()
+                .unwrap();
+
+            // Create the updated concept
+            let mut updated_concept = Concept {
+                id: concept_id,
+                data: ConceptData::Structured(json!({"value": "alice was here"}).to_string()),
+                metadata: ConceptMetadata {
+                    created_at: concept_for_alice.created_at,
+                    updated_at: Utc::now(),
+                    version: concept_for_alice.version + 1,
+                    transaction_id: alice_txn.id,
+                },
+            };
+
+            alice_txn.write_set.insert(concept_id);
+            alice_txn.pending_writes.insert(concept_id, updated_concept);
+
+            thread::sleep(Duration::from_millis(10));
+            assert!(manager.commit_transaction(alice_txn).is_ok());
+        }
+
+        // --- 5. BOB TRIES TO COMMIT (AND FAILS) ---
+        {
+            let mut updated_concept_bob = Concept {
+                id: concept_id,
+                data: ConceptData::Structured(json!({"value": "bob was here"}).to_string()),
+                metadata: Default::default(),
+            };
+            bob_txn.write_set.insert(concept_id);
+            bob_txn
+                .pending_writes
+                .insert(concept_id, updated_concept_bob);
+
+            let bob_commit_result = manager.commit_transaction(bob_txn);
+            assert!(bob_commit_result.is_err());
+            assert!(matches!(
+                bob_commit_result.unwrap_err(),
+                MnemonicError::TransactionConflict(_)
+            ));
+        }
+
+        // --- 6. DURABILITY PROOF ---
+        // Let's check that ALICE's commit (version 2) is on disk.
+        let cf_versions = backend.db.cf_handle("versions").unwrap();
+        let expected_key_v2 = format!("cv:{}:2", concept_id);
+        let version_data_v2 = backend.db.get_cf(&cf_versions, expected_key_v2).unwrap();
+        assert!(version_data_v2.is_some());
+
+        // And check that the INITIAL commit (version 1) is ALSO on disk.
+        let expected_key_v1 = format!("cv:{}:1", concept_id);
+        let version_data_v1 = backend.db.get_cf(&cf_versions, expected_key_v1).unwrap();
+        assert!(version_data_v1.is_some());
     }
 }

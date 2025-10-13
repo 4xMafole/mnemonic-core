@@ -51,7 +51,8 @@ impl Concept {
         Self {
             id: Uuid::new_v4(),
             data: ConceptData::Structured(data.to_string()),
-            metadata: ConceptMetadata::default(),
+            // Set version to 0 to indicate it's `new` and has never been versioned.
+            metadata: ConceptMetadata{version: 0, ..Default::default()},
         }
     }
 
@@ -78,12 +79,12 @@ pub struct ConceptVersion {
 }
 
 impl ConceptVersion {
-    pub fn from_concept(concept: &Concept, transaction_id: TransactionId) -> Self {
+    pub fn from_concept(concept: &Concept, transaction_id: TransactionId, new_version_num: u64) -> Self {
         Self {
             concept_id: concept.id,
-            version: concept.metadata.version,
+            version: new_version_num,
             data: concept.data.clone(),
-            created_at: concept.metadata.updated_at,
+            created_at: Utc::now(),
             created_by: transaction_id,
             deleted_at: None,
             deleted_by: None,

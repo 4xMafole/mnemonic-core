@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::types::concept::ConceptVersion;
 use crate::types::concept::*; //Import everything from the concept file
 use crate::types::relationship::*;
 use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch};
@@ -12,10 +13,12 @@ use uuid::Uuid; //Import everything from relationship file
 const CF_CONCEPTS: &str = "concepts";
 const CF_RELATIONSHIPS: &str = "relationships";
 const CF_INDICES: &str = "indices";
+const CF_VERSIONS: &str = "versions";
 
 /// RocksDB-based storage backend for Mnemonic
+#[derive(Debug)]
 pub struct RocksBackend {
-    db: Arc<DB>, // Arc stands for 'Atomically Reference Counted'.
+    pub db: Arc<DB>, // Arc stands for 'Atomically Reference Counted'.
                  // It's a safe way to share the database connection across many threads.
 }
 
@@ -33,6 +36,7 @@ impl RocksBackend {
             ColumnFamilyDescriptor::new(CF_CONCEPTS, Options::default()),
             ColumnFamilyDescriptor::new(CF_RELATIONSHIPS, Options::default()),
             ColumnFamilyDescriptor::new(CF_INDICES, Options::default()),
+            ColumnFamilyDescriptor::new(CF_VERSIONS, Options::default()),
         ];
 
         // --- Open the Database ---
@@ -179,6 +183,24 @@ impl RocksBackend {
             self.db.write(batch)?;
         }
 
+        Ok(())
+    }
+
+    /// Adds a `put` operation for a ConceptVersion to a WriteBatch.
+    /// This is used by the TransactionManager to commit changes atomically.
+    pub fn store_concept_version(
+        &self,
+        version: &ConceptVersion,
+        batch: &mut WriteBatch,
+    ) -> Result<()> {
+        let cf = self.db.cf_handle(CF_VERSIONS).unwrap();
+
+        // We'll create a key like: "cv:{concept_id}:{version_number}"
+        // This lets us easily look up all versions for a concept
+        let key = format!("cv:{}:{}", version.concept_id, version.version);
+        let value = bincode::serialize(version)?;
+
+        batch.put_cf(&cf, key, value);
         Ok(())
     }
 }
