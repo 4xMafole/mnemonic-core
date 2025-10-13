@@ -1,7 +1,7 @@
 use super::versioning::VersionStore;
 use crate::storage::RocksBackend;
 use crate::types::concept::{Concept, ConceptId, ConceptVersion};
-use crate::types::relationship::{Relationship, RelationshipId};
+use crate::types::relationship::RelationshipId;
 use crate::{MnemonicError, Result};
 use chrono::{DateTime, Utc};
 use rocksdb::WriteBatch;
@@ -72,12 +72,27 @@ pub struct TransactionManager {
 
 impl TransactionManager {
     /// Creates a new, empty TransactionManager.
-    pub fn new(backend: Arc<RocksBackend>) -> Self {
-        Self {
-            version_store: Arc::new(VersionStore::new()),
+    pub fn new(backend: Arc<RocksBackend>) -> Result<Self> {
+        // Note: It now returns a Result
+        // 1. Create a new, empty VersionStore.
+        let version_store = VersionStore::new();
+
+        // 2. Load all historical versions from the disk.
+        let all_versions = backend.load_all_concept_versions()?;
+
+        // 3. "Hydrate" the in-memory VersionStore by re-inserting all the historical data.
+        for version in all_versions {
+            version_store.add_concept_version(version)?;
+        }
+
+        // We would also hydrate relationship versions here in a full implementation.
+
+        // 4. Create the manager with the now-hydrated VersionStore.
+        Ok(Self {
+            version_store: Arc::new(version_store),
             backend,
             active_transactions: RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     /// Begins a new transaction and registers it as active.
@@ -182,6 +197,12 @@ impl TransactionManager {
         // If we get through the whole loop without finding any conflicts, we are safe.
         Ok(())
     }
+
+    /// Returns a thread-safe handle to the internal VersionStore.
+    /// This is needed for the engine to perform read operations.
+    pub fn version_store(&self) -> Arc<VersionStore> {
+        Arc::clone(&self.version_store)
+    }
 }
 
 #[cfg(test)]
@@ -198,7 +219,7 @@ mod tests {
         //1. Setup
         let dir = tempdir().unwrap();
         let backend = Arc::new(RocksBackend::new(dir.path()).unwrap());
-        let manager = TransactionManager::new(Arc::clone(&backend));
+        let manager = TransactionManager::new(Arc::clone(&backend)).unwrap();
 
         //2. Begin transaction
         let txn = manager.begin_transaction(IsolationLevel::Snapshot).unwrap();
@@ -229,7 +250,7 @@ mod tests {
         // Create a backend directly for our test, so we can peek into it.
         let dir = tempdir().unwrap();
         let backend = Arc::new(RocksBackend::new(dir.path()).unwrap());
-        let manager = TransactionManager::new(Arc::clone(&backend));
+        let manager = TransactionManager::new(Arc::clone(&backend)).unwrap();
 
         // --- 2. CREATE INITIAL STATE (The Correct Way) ---
         // Let's create our initial concept inside a transaction and commit it.
@@ -266,7 +287,7 @@ mod tests {
                 .unwrap();
 
             // Create the updated concept
-            let mut updated_concept = Concept {
+            let updated_concept = Concept {
                 id: concept_id,
                 data: ConceptData::Structured(json!({"value": "alice was here"}).to_string()),
                 metadata: ConceptMetadata {
@@ -286,7 +307,7 @@ mod tests {
 
         // --- 5. BOB TRIES TO COMMIT (AND FAILS) ---
         {
-            let mut updated_concept_bob = Concept {
+            let updated_concept_bob = Concept {
                 id: concept_id,
                 data: ConceptData::Structured(json!({"value": "bob was here"}).to_string()),
                 metadata: Default::default(),

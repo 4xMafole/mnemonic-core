@@ -5,7 +5,7 @@ use tokio::task;
 use uuid::Uuid;
 
 use crate::error::{MnemonicError, Result};
-use super::transaction::{Transaction, TransactionId, TransactionManager, IsolationLevel};
+use super::transaction::{Transaction, TransactionManager, IsolationLevel};
 use crate::storage::RocksBackend;
 use crate::types::{
     concept::{Concept, ConceptId},
@@ -26,7 +26,7 @@ impl GraphEngine {
     pub fn new(storage_path: &Path) -> Result<Self> {
         // Initialize the low-level backend.
         let backend = Arc::new(RocksBackend::new(storage_path)?);
-        let transaction_manager = TransactionManager::new(Arc::clone(&backend));
+        let transaction_manager = TransactionManager::new(Arc::clone(&backend))?;
         // Wrap it in an Arc and store it.
         Ok(Self {
             transaction_manager: Arc::new(transaction_manager),
@@ -125,6 +125,12 @@ impl GraphEngine {
         task::spawn_blocking(move || {
             manager.abort_transaction(transaction_id)
         }).await.unwrap()
+    }
+
+    /// Returns a thread-safe handle to the internal TransactionManager.
+    /// This is useful for advanced operations or for testing and debugging.
+    pub fn transaction_manager(&self) -> Arc<TransactionManager> {
+        Arc::clone(&self.transaction_manager)
     }
 }
 

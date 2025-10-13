@@ -1,8 +1,8 @@
-use crate::error::Result;
 use crate::types::concept::ConceptVersion;
 use crate::types::concept::*; //Import everything from the concept file
 use crate::types::relationship::*;
-use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch};
+use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch};
+use crate::error::{MnemonicError, Result};
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid; //Import everything from relationship file
@@ -19,7 +19,7 @@ const CF_VERSIONS: &str = "versions";
 #[derive(Debug)]
 pub struct RocksBackend {
     pub db: Arc<DB>, // Arc stands for 'Atomically Reference Counted'.
-                 // It's a safe way to share the database connection across many threads.
+                     // It's a safe way to share the database connection across many threads.
 }
 
 impl RocksBackend {
@@ -202,5 +202,30 @@ impl RocksBackend {
 
         batch.put_cf(&cf, key, value);
         Ok(())
+    }
+
+    /// Loads all concept versions from the database.
+    /// This is used to "hydrate" the in-memory VersionStore on startup.
+    pub fn load_all_concept_versions(&self) -> Result<Vec<ConceptVersion>> {
+        let cf = self.db.cf_handle(CF_VERSIONS).unwrap();
+
+        // Create an iterator that scans the entire 'versions' column family.
+        let mut iter = self.db.iterator_cf(&cf, IteratorMode::Start);
+        let mut versions = Vec::new();
+
+        while let Some(result) = iter.next() {
+            match result {
+                Ok((_key, value)) => {
+                    // For each record found, deserialize the value back into a ConceptVersion.
+                    if let Ok(version) = bincode::deserialize(&value) {
+                        versions.push(version);
+                    }
+                    // In real code, we'd log deserialization errors. For now, we just skip them.
+                }
+                Err(e) => return Err(MnemonicError::Storage(e)),
+            }
+        }
+
+        Ok(versions)
     }
 }

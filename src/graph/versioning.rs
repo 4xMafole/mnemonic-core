@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::RwLock; // Read-Write Lock: Allows many readers or one writer at a time.
-use uuid::Uuid;
 
 use crate::error::{MnemonicError, Result};
 use crate::types::concept::{ConceptId, ConceptVersion};
@@ -169,7 +168,7 @@ impl VersionStore {
 mod tests {
     use super::*;
     use crate::types::concept::ConceptData;
-    use crate::types::relationship::RelationType;
+    use uuid::Uuid;
     use crate::types::relationship::{Relationship, RelationshipVersion};
 
     #[test]
