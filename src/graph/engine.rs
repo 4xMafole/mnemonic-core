@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::task;
 use uuid::Uuid;
+use serde_json::json;
 
 use super::transaction::{IsolationLevel, Transaction, TransactionManager};
 use crate::error::{MnemonicError, Result};
@@ -194,6 +195,43 @@ impl GraphEngine {
     pub fn transaction_manager(&self) -> Arc<TransactionManager> {
         Arc::clone(&self.transaction_manager)
     }
+
+    /// Checks if the graph is empty and, if so, populates it with initial seed data.
+/// This is an async function because our engine operations are async.
+pub async fn seed_if_empty(&self) -> Result<()> {
+    let manager = self.transaction_manager();
+    let vs = manager.version_store();
+
+    // This check is synchronous, so it doesn't need to be in a spawn_blocking task.
+    let all_concepts = vs.get_all_active_concepts()?;
+
+    // If the VersionStore is NOT empty, it means we've already seeded. Do nothing.
+    if !all_concepts.is_empty() {
+        tracing::info!("Graph already contains data. Skipping seed.");
+        return Ok(());
+    }
+
+    tracing::info!("Graph is empty. Seeding with initial data...");
+
+    // --- Our Sample Data Story ---
+
+    // 1. Create the core concepts.
+    let mnemonic = self.store(json!({"name": "Mnemonic Computing", "type": "Project"})).await?;
+    let developer = self.store(json!({"name": "4xmafole", "type": "Person"})).await?;
+    let ui = self.store(json!({"name": "Explorer UI", "type": "Component"})).await?;
+    let backend = self.store(json!({"name": "Core Engine", "type": "Component"})).await?;
+    
+    // 2. Create the relationships to tell the story.
+    self.relate(developer, "leads".to_string(), mnemonic).await?;
+    self.relate(mnemonic, "is_composed_of".to_string(), ui).await?;
+    self.relate(mnemonic, "is_composed_of".to_string(), backend).await?;
+    self.relate(ui, "is_written_in".to_string(), self.store(json!({"name": "React", "type": "Technology"})).await?).await?;
+    self.relate(backend, "is_written_in".to_string(), self.store(json!({"name": "Rust", "type": "Technology"})).await?).await?;
+
+    tracing::info!("Seeding complete!");
+
+    Ok(())
+}
 }
 
 #[cfg(test)]
