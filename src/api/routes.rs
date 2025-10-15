@@ -134,3 +134,100 @@ async fn get_graph_data(
 
     Ok(Json(GraphData {nodes, edges}))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*; // Import everything from the parent module (routes.rs)
+    use crate::graph::GraphEngine;
+    use axum_test::TestServer; 
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    /// Helper function to quickly create a testable server.
+    fn setup_test_server() -> TestServer {
+        let dir = tempdir().unwrap();
+        let engine = Arc::new(GraphEngine::new(dir.path()).unwrap());
+        let app_state = AppState { engine };
+        let app = create_router(app_state);
+        TestServer::new(app).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_ping_route() {
+        let server = setup_test_server();
+
+        // Make a GET request to the /ping route.
+        let response = server.get("/ping").await;
+        
+        response.assert_status_ok();
+        response.assert_text("pong");
+    }
+
+    #[tokio::test]
+    async fn test_create_concept_happy_path() {
+        let server = setup_test_server();
+
+        // Make a POST request to /concepts with a valid JSON body.
+        let response = server
+            .post("/concepts")
+            .json(&json!({
+                "data": {
+                    "type": "test_concept",
+                    "name": "API Test"
+                }
+            }))
+            .await;
+
+        response.assert_status_ok();
+        
+        // Check that the JSON response we get back has the field we expect.
+        let json: CreateConceptResponse = response.json();
+        assert!(!json.concept_id.is_nil()); // Ensure we got a valid UUID
+    }
+
+    #[tokio::test]
+    async fn test_full_api_lifecycle_for_graph() {
+        let server = setup_test_server();
+
+        // 1. Create a "person" concept.
+        let person_response: CreateConceptResponse = server
+            .post("/concepts")
+            .json(&json!({"data": {"name": "API Alice"}}))
+            .await
+            .json();
+        let person_id = person_response.concept_id;
+
+        // 2. Create a "project" concept.
+        let project_response: CreateConceptResponse = server
+            .post("/concepts")
+            .json(&json!({"data": {"name": "API Project"}}))
+            .await
+            .json();
+        let project_id = project_response.concept_id;
+        
+        // 3. Relate them using the /relationships endpoint.
+        let rel_response = server
+            .post("/relationships")
+            .json(&json!({
+                "source": person_id,
+                "type": "works_on",
+                "target": project_id
+            }))
+            .await;
+        
+        rel_response.assert_status_ok();
+
+        // 4. Finally, get the full graph and verify everything is there.
+        let graph_response: GraphData = server.get("/graph").await.json();
+
+        // Assert that we have exactly two nodes and one edge.
+        assert_eq!(graph_response.nodes.len(), 2);
+        assert_eq!(graph_response.edges.len(), 1);
+
+        // A more specific check on the edge.
+        let edge = &graph_response.edges[0];
+        assert_eq!(edge.source, person_id.to_string());
+        assert_eq!(edge.target, project_id.to_string());
+        assert_eq!(edge.label, "works_on");
+    }
+}
