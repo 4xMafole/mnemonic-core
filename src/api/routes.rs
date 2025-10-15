@@ -1,6 +1,7 @@
 use axum::{extract::State, routing::{get, post}, Json, Router};
+use tokio::task;
 use std::sync::Arc;
-use crate::{graph::GraphEngine, types::concept::{ConceptData, ConceptId}};
+use crate::{graph::GraphEngine, types::concept::{ConceptData, ConceptId}, MnemonicError};
 use crate::types::relationship::{RelationshipId, RelationType};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -22,19 +23,21 @@ pub struct CreateConceptPayload {
 
 // This defines the shape of the JSON we will send back.
 // e.g {"concept_id": "..."}
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CreateConceptResponse {
     concept_id: Uuid,
 }
 
 // These structs are simplified for the UI. It doesn't need all the metadata.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+
 struct GraphNode {
     id: String,
     label: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+
 struct GraphEdge {
     id: String,
     source: String,
@@ -42,7 +45,7 @@ struct GraphEdge {
     label: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct GraphData {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
@@ -101,38 +104,50 @@ async fn create_concept(
         }
     }
 
-async fn get_graph_data(
+    async fn get_graph_data(
     State(state): State<AppState>,
 ) -> Result<Json<GraphData>, String> {
-
-    // This is a temporary solution! We're accessing the internals directly.
-    // Later, a real RETRIEVE query will handle this.
+    
+    // We get the Transaction Manager...
     let tm = state.engine.transaction_manager();
+    // ...and from it, the already-hydrated Version Store.
     let vs = tm.version_store();
 
-    let nodes: Vec<GraphNode> = vs.get_all_active_concepts().unwrap_or_default()
-    .iter()
-    .map(|version| {
-        GraphNode{
-            id: version.concept_id.to_string(),
-            label: match &version.data{
-                // try to find a "name" property to use as a label.
-                ConceptData::Structured(s) => {
-                    let json: serde_json::Value = serde_json::from_str(s).unwrap_or_default();
+    // Spawn a blocking task because RwLock is synchronous.
+    let graph_data_result = task::spawn_blocking(move || {
+        // Fetch nodes from the IN-MEMORY, hydrated Version Store.
+        let nodes: Vec<GraphNode> = vs.get_all_active_concepts().unwrap_or_default()
+            .iter()
+            .map(|version| GraphNode {
+                id: version.concept_id.to_string(),
+                label: match &version.data {
+                    ConceptData::Structured(s) => {
+                        let json: serde_json::Value = serde_json::from_str(s).unwrap_or_default();
+                        json.get("name").and_then(|v| v.as_str()).unwrap_or("Concept").to_string()
+                    },
+                    _ => "Concept".to_string(),
+                }
+            })
+            .collect();
+    
+        // Fetch edges from the IN-MEMORY, hydrated Version Store.
+        let edges: Vec<GraphEdge> = vs.get_all_active_relationships().unwrap_or_default()
+            .iter()
+            .map(|version| GraphEdge {
+                id: version.relationship_id.to_string(),
+                source: version.source.to_string(),
+                target: version.target.to_string(),
+                label: version.relationship_type.clone(),
+            })
+            .collect();
+            
+        Ok(GraphData { nodes, edges })
+    }).await.map_err(|e| format!("Task error: {}", e))?;
 
-                    json.get("name").and_then(|v| v.as_str()).unwrap_or("Concept").to_string()
-                },
-                _ => "Concept".to_string(),
-            }
-        }
-    }).collect();
+    let graph_data: GraphData = graph_data_result.map_err(|e: MnemonicError| e.to_string())?;
 
-     tracing::info!("Returning {} nodes", nodes.len());
-     
-    // For now, edges will be empty. We'll implement this next.
-    let edges = Vec::<GraphEdge>::new();
-
-    Ok(Json(GraphData {nodes, edges}))
+    tracing::info!("Returning {} nodes and {} edges", graph_data.nodes.len(), graph_data.edges.len());
+    Ok(Json(graph_data))
 }
 
 #[cfg(test)]
