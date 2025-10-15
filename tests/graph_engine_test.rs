@@ -1,9 +1,12 @@
 use chrono::Utc;
-use mnemonic_core::{graph::{GraphEngine, IsolationLevel}, types::concept::Concept};
+use mnemonic_core::{
+    graph::{GraphEngine, IsolationLevel},
+    types::concept::Concept,
+};
 use serde_json::json;
 use tempfile::tempdir;
- 
-use std::time::Duration; 
+
+use std::time::Duration;
 use tokio::{task, time::sleep};
 
 // The `#[tokio::test]` attribute tells Rust to use the Tokio async runtime to run this test.
@@ -54,7 +57,6 @@ async fn test_full_engine_lifecycle() {
     println!("Unrelate verification PASSED!");
 }
 
-
 #[tokio::test]
 async fn test_transaction_is_durable_across_restarts() {
     // --- 1. SETUP ---
@@ -68,15 +70,18 @@ async fn test_transaction_is_durable_across_restarts() {
         let engine1 = GraphEngine::new(&db_path).unwrap();
 
         // Begin a transaction
-        let mut txn = engine1.begin_transaction(IsolationLevel::Snapshot).await.unwrap();
-        
+        let mut txn = engine1
+            .begin_transaction(IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+
         // Create a new concept within the transaction
         let new_concept = Concept::new(json!({"handle": "4xMafole"}));
         concept_id = new_concept.id;
 
         txn.write_set.insert(concept_id);
         txn.pending_writes.insert(concept_id, new_concept);
-        
+
         // Commit the transaction. This should write to RocksDB.
         engine1.commit_transaction(txn).await.unwrap();
 
@@ -98,17 +103,22 @@ async fn test_transaction_is_durable_across_restarts() {
         let tm = engine2.transaction_manager();
         let concept_was_loaded = task::spawn_blocking(move || {
             let version_store = tm.version_store(); // Get access to the hydrated store
-            
+
             // Try to find the concept we created in the first session, at the current time.
             let version = version_store.get_concept_version_at_timestamp(&concept_id, Utc::now());
-            
+
             // Check if we found it.
             version.unwrap().is_some()
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // --- 4. ASSERTION ---
         // This is the moment of truth. If this passes, our data survived the restart.
-        assert!(concept_was_loaded, "Concept was not loaded from disk on engine restart!");
+        assert!(
+            concept_was_loaded,
+            "Concept was not loaded from disk on engine restart!"
+        );
 
         println!("SUCCESS: Transaction was durable and hydrated correctly!");
     }

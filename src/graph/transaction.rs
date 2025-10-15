@@ -1,7 +1,7 @@
 use super::versioning::VersionStore;
 use crate::storage::RocksBackend;
 use crate::types::concept::{Concept, ConceptId, ConceptVersion};
-use crate::types::relationship::RelationshipId;
+use crate::types::relationship::{Relationship, RelationshipId, RelationshipVersion};
 use crate::{MnemonicError, Result};
 use chrono::{DateTime, Utc};
 use rocksdb::WriteBatch;
@@ -36,9 +36,16 @@ pub struct Transaction {
     /// A list of ConceptIDs this transaction has written to. Used for conflict detection.
     pub write_set: HashSet<ConceptId>,
 
-    // NOTE: We'll add sets for relationships later to keep this simple for now.
     /// A private "scratchpad" for new or updated concepts for this transaction.
     pub pending_writes: HashMap<ConceptId, Concept>,
+
+    /// A list of RelationshipIDs this transaction has read. Used for conflict detection.
+    pub relationship_read_set: HashSet<RelationshipId>,
+
+    /// A list of RelationshipIDs this transaction has written to. Used for conflict detection.
+    pub relationship_write_set: HashSet<RelationshipId>,
+
+    pub pending_relationship_writes: HashMap<RelationshipId, Relationship>,
 
     /// A list of relationships marked for deletion in this transaction.
     pub pending_deletes: HashSet<RelationshipId>,
@@ -53,7 +60,10 @@ impl Transaction {
             isolation_level,
             read_set: HashSet::new(),
             write_set: HashSet::new(),
+            relationship_read_set: HashSet::new(),
+            relationship_write_set: HashSet::new(),
             pending_writes: HashMap::new(),
+            pending_relationship_writes: HashMap::new(),
             pending_deletes: HashSet::new(),
         }
     }
@@ -78,14 +88,18 @@ impl TransactionManager {
         let version_store = VersionStore::new();
 
         // 2. Load all historical versions from the disk.
-        let all_versions = backend.load_all_concept_versions()?;
+        let concept_versions = backend.load_all_concept_versions()?;
 
         // 3. "Hydrate" the in-memory VersionStore by re-inserting all the historical data.
-        for version in all_versions {
+        for version in concept_versions {
             version_store.add_concept_version(version)?;
         }
 
-        // We would also hydrate relationship versions here in a full implementation.
+        // Hydrate relationships
+        let relationship_versions = backend.load_all_relationship_versions()?;
+        for version in relationship_versions {
+            version_store.add_relationship_version(version)?;
+        }
 
         // 4. Create the manager with the now-hydrated VersionStore.
         Ok(Self {
@@ -140,11 +154,11 @@ impl TransactionManager {
         let mut batch = WriteBatch::default(); //1. Create a new atomic batch
 
         // Loop through all the "pending writes" in our transaction's shopping cart.
-        for (concept_id, pending_concept) in transaction.pending_writes {
+        for (_concept_id, pending_concept) in &transaction.pending_writes {
             // 1. Get the last known version from the in-memory store.
             let last_version = self
                 .version_store
-                .get_concept_version_at_timestamp(&concept_id, transaction.start_timestamp)?;
+                .get_concept_version_at_timestamp(_concept_id, transaction.start_timestamp)?;
 
             // 2. Calculate the next version number
             let next_version_num = last_version.map_or(1, |v| v.version + 1);
@@ -159,7 +173,45 @@ impl TransactionManager {
             self.version_store.add_concept_version(new_version)?;
         }
 
-        // We would also apply pending deletes and relationship changes here...
+        for (rel_id, pending_rel) in &transaction.pending_relationship_writes {
+            let last_version = self
+                .version_store
+                .get_relationship_version_at_timestamp(rel_id, transaction.start_timestamp)?;
+            let next_version_num = last_version.map_or(1, |v| v.version + 1);
+
+            let mut rel_for_version = pending_rel.clone();
+            rel_for_version.metadata.version = next_version_num;
+            rel_for_version.metadata.transaction_id = transaction.id;
+
+            let new_version =
+                RelationshipVersion::from_relationship(&rel_for_version, transaction.id);
+
+            // Now we call our new, correct function.
+            self.backend
+                .store_relationship_version(&new_version, &mut batch)?;
+            self.version_store.add_relationship_version(new_version)?;
+        }
+
+        let commit_time = Utc::now();
+        for rel_id in &transaction.pending_deletes {
+            // 1. Get the last active version of the relationship.
+            if let Some(mut latest_version) = self
+                .version_store
+                .get_relationship_version_at_timestamp(rel_id, transaction.start_timestamp)?
+            {
+                // 2. Mark this version as "deleted".
+                latest_version.deleted_at = Some(commit_time);
+                latest_version.deleted_by = Some(transaction.id);
+                // We consider this a modification, so we increment the version.
+                latest_version.version += 1;
+
+                // 3. Persist this new "deleted" version to disk and memory.
+                self.backend
+                    .store_relationship_version(&latest_version, &mut batch)?;
+                self.version_store
+                    .add_relationship_version(latest_version)?;
+            }
+        }
 
         // write the entire batch to disk, atomically.
         self.backend.db.write(batch)?;
@@ -202,6 +254,11 @@ impl TransactionManager {
     /// This is needed for the engine to perform read operations.
     pub fn version_store(&self) -> Arc<VersionStore> {
         Arc::clone(&self.version_store)
+    }
+
+    /// Retuns a thread-safe handle to the internal backend
+    pub fn backend(&self) -> Arc<RocksBackend> {
+        Arc::clone(&self.backend)
     }
 }
 

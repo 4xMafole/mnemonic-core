@@ -162,14 +162,60 @@ impl VersionStore {
 
         Ok(false)
     }
+
+    /// Gets a snapshot of all active concepts at the current time.
+    pub fn get_all_active_concepts(&self) -> Result<Vec<ConceptVersion>> {
+        let now = Utc::now();
+        let versions_map = self
+            .concept_versions
+            .read()
+            .map_err(|e| MnemonicError::Transaction(format!("Read lock failed: {}", e)))?;
+
+        let mut active_concepts = Vec::new();
+
+        // Iterate through the list of version histories for each concept.
+        for versions_vec in versions_map.values() {
+            // Get the MOST RECENT version. If no versions exist, skip.
+            if let Some(latest_version) = versions_vec.last() {
+                // Check if THIS LATEST version is active right now.
+                if latest_version.is_active_at(now) {
+                    active_concepts.push(latest_version.clone());
+                }
+            }
+        }
+        Ok(active_concepts)
+    }
+
+    /// Gets a snapshot of all active relationships at the current time.
+    pub fn get_all_active_relationships(&self) -> Result<Vec<RelationshipVersion>> {
+        let now = Utc::now();
+        let versions_map = self
+            .relationship_versions
+            .read()
+            .map_err(|e| MnemonicError::Transaction(format!("Read lock failed: {}", e)))?;
+
+        let mut active_relationships = Vec::new();
+
+        // Iterate through the list of version histories for each relationship.
+        for versions_vec in versions_map.values() {
+            // Get the MOST RECENT version.
+            if let Some(latest_version) = versions_vec.last() {
+                // Check if THIS LATEST version is active.
+                if latest_version.is_active_at(now) {
+                    active_relationships.push(latest_version.clone());
+                }
+            }
+        }
+        Ok(active_relationships)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::concept::ConceptData;
-    use uuid::Uuid;
     use crate::types::relationship::{Relationship, RelationshipVersion};
+    use uuid::Uuid;
 
     #[test]
     fn test_version_time_travel() {

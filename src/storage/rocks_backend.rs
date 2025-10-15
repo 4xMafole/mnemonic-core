@@ -1,8 +1,8 @@
+use crate::error::{MnemonicError, Result};
 use crate::types::concept::ConceptVersion;
 use crate::types::concept::*; //Import everything from the concept file
 use crate::types::relationship::*;
 use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch};
-use crate::error::{MnemonicError, Result};
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid; //Import everything from relationship file
@@ -204,6 +204,23 @@ impl RocksBackend {
         Ok(())
     }
 
+    /// Adds a 'put' operation for a RelationshipVersion to a WriteBatch.
+    pub fn store_relationship_version(
+        &self,
+        version: &RelationshipVersion,
+        batch: &mut WriteBatch,
+    ) -> Result<()> {
+        let cf = self.db.cf_handle(CF_VERSIONS).unwrap();
+
+        // Key: "rv:{relationship_id}:{version_number}" (rv for Relationship Version)
+        let key = format!("rv:{}:{}", version.relationship_id, version.version);
+        let value = bincode::serialize(version)?;
+
+        batch.put_cf(&cf, key, value);
+
+        Ok(())
+    }
+
     /// Loads all concept versions from the database.
     /// This is used to "hydrate" the in-memory VersionStore on startup.
     pub fn load_all_concept_versions(&self) -> Result<Vec<ConceptVersion>> {
@@ -228,4 +245,20 @@ impl RocksBackend {
 
         Ok(versions)
     }
+    /// Loads all relationship versions from the database.
+    /// This is used to "hydrate" the in-memory VersionStore on startup.
+pub fn load_all_relationship_versions(&self) -> Result<Vec<RelationshipVersion>> {
+    let cf = self.db.cf_handle(CF_VERSIONS).unwrap();
+    let mut versions = Vec::new();
+    // Use a prefix iterator to only scan for "rv:" (Relationship Version) keys
+    let iter = self.db.prefix_iterator_cf(&cf, "rv:");
+
+    for item in iter {
+        let (_key, value) = item?;
+        if let Ok(version) = bincode::deserialize::<RelationshipVersion>(&value) {
+            versions.push(version);
+        }
+    }
+    Ok(versions)
+}
 }
