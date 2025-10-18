@@ -1,7 +1,7 @@
-use axum::{extract::State, routing::{get, post}, Json, Router};
+use axum::{extract::{State, Path}, routing::{get, post}, Json, Router};
 use tokio::task;
 use std::sync::Arc;
-use crate::{graph::GraphEngine, types::concept::{ConceptData, ConceptId}, MnemonicError};
+use crate::{graph::GraphEngine, types::concept::{ConceptData, ConceptId, Concept}, MnemonicError};
 use crate::types::relationship::{RelationshipId, RelationType};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -70,6 +70,7 @@ pub fn create_router(app_state: AppState) -> Router {
     Router::new()
     .route("/ping", get(ping))
     .route("/concepts", post(create_concept))
+    .route("/concepts/{id}", get(get_concept_details))
     .route("/graph", get(get_graph_data))
     .route("/relationships", post(relate_concepts))
     .with_state(app_state)
@@ -148,6 +149,18 @@ async fn create_concept(
 
     tracing::info!("Returning {} nodes and {} edges", graph_data.nodes.len(), graph_data.edges.len());
     Ok(Json(graph_data))
+}
+
+/// This handler will be called for requests to `/concepts/:id`
+async fn get_concept_details(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>, //Axum extracts the ID from the URL path
+) -> Result<Json<Concept>, String> {
+    match state.engine.get_concept(id).await {
+        Ok(Some(concept)) => Ok(Json(concept)),
+        Ok(None) => Err(format!("Concept with ID {} not found", id)),
+        Err(e) => Err(format!("Failed to retrieve concept: {}", e)),
+    }
 }
 
 #[cfg(test)]

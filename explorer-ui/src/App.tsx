@@ -2,28 +2,35 @@
 import { useState } from 'react';
 import GraphCanvas from './components/GraphCanvas';
 import AddConceptForm from './components/AddConceptForm';
+import InspectorSidebar from './components/InspectorSidebar'; // Import the new component
 
 function App() {
-  // Create a state variable that we can change to force a refresh.
   const [graphKey, setGraphKey] = useState(0);
+  // NEW STATE: Keep track of the currently selected concept ID.
+  const [selectedConceptId, setSelectedConceptId] = useState<string | null>(null);
 
   const handleGraphUpdate = () => {
-    // Incrementing the key will cause the GraphCanvas to unmount and re-mount,
-    // which will trigger its data fetching `useEffect` hook again.
     setGraphKey(prevKey => prevKey + 1);
+  };
+  
+  // Create a container to handle layout.
+  const mainStyle: React.CSSProperties = {
+      position: 'relative',
   };
 
   return (
-    <div style={{ fontFamily: 'sans-serif' }}>
-      <h1>Mnemonic Explorer</h1>
-      
-      {/* Pass the refresh function to our form */}
-      <AddConceptForm onConceptAdded={handleGraphUpdate} />
+    <div style={mainStyle}>
+      <div style={{ marginRight: '330px' }}> {/* Add margin to prevent overlap */}
+        <h1>Mnemonic Explorer</h1>
+        <AddConceptForm onConceptAdded={handleGraphUpdate} />
+        <hr />
+        <GraphCanvas 
+            key={graphKey} 
+            onNodeClick={setSelectedConceptId}  // Pass the setter function (typed as any to satisfy TSX)
+        />
+      </div>
 
-      <hr />
-      
-      {/* Add the key prop to our GraphCanvas */}
-      <GraphCanvas key={graphKey} />
+      <InspectorSidebar conceptId={selectedConceptId} />
     </div>
   );
 }

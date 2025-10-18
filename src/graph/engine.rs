@@ -1,15 +1,15 @@
 use serde_json;
+use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::task;
 use uuid::Uuid;
-use serde_json::json;
 
 use super::transaction::{IsolationLevel, Transaction, TransactionManager};
 use crate::error::{MnemonicError, Result};
 use crate::storage::RocksBackend;
 use crate::types::{
-    concept::{Concept, ConceptId},
+    concept::{Concept, ConceptId, ConceptVersion},
     relationship::{RelationType, Relationship, RelationshipId, RelationshipMetadata},
 };
 
@@ -197,41 +197,94 @@ impl GraphEngine {
     }
 
     /// Checks if the graph is empty and, if so, populates it with initial seed data.
-/// This is an async function because our engine operations are async.
-pub async fn seed_if_empty(&self) -> Result<()> {
-    let manager = self.transaction_manager();
-    let vs = manager.version_store();
+    /// This is an async function because our engine operations are async.
+    pub async fn seed_if_empty(&self) -> Result<()> {
+        let manager = self.transaction_manager();
+        let vs = manager.version_store();
 
-    // This check is synchronous, so it doesn't need to be in a spawn_blocking task.
-    let all_concepts = vs.get_all_active_concepts()?;
+        // This check is synchronous, so it doesn't need to be in a spawn_blocking task.
+        let all_concepts = vs.get_all_active_concepts()?;
 
-    // If the VersionStore is NOT empty, it means we've already seeded. Do nothing.
-    if !all_concepts.is_empty() {
-        tracing::info!("Graph already contains data. Skipping seed.");
-        return Ok(());
+        // If the VersionStore is NOT empty, it means we've already seeded. Do nothing.
+        if !all_concepts.is_empty() {
+            tracing::info!("Graph already contains data. Skipping seed.");
+            return Ok(());
+        }
+
+        tracing::info!("Graph is empty. Seeding with initial data...");
+
+        // --- Our Sample Data Story ---
+
+        // 1. Create the core concepts.
+        let mnemonic = self
+            .store(json!({"name": "Mnemonic Computing", "type": "Project"}))
+            .await?;
+        let developer = self
+            .store(json!({"name": "4xmafole", "type": "Person"}))
+            .await?;
+        let ui = self
+            .store(json!({"name": "Explorer UI", "type": "Component"}))
+            .await?;
+        let backend = self
+            .store(json!({"name": "Core Engine", "type": "Component"}))
+            .await?;
+
+        // 2. Create the relationships to tell the story.
+        self.relate(developer, "leads".to_string(), mnemonic)
+            .await?;
+        self.relate(mnemonic, "is_composed_of".to_string(), ui)
+            .await?;
+        self.relate(mnemonic, "is_composed_of".to_string(), backend)
+            .await?;
+        self.relate(
+            ui,
+            "is_written_in".to_string(),
+            self.store(json!({"name": "React", "type": "Technology"}))
+                .await?,
+        )
+        .await?;
+        self.relate(
+            backend,
+            "is_written_in".to_string(),
+            self.store(json!({"name": "Rust", "type": "Technology"}))
+                .await?,
+        )
+        .await?;
+
+        tracing::info!("Seeding complete!");
+
+        Ok(())
     }
 
-    tracing::info!("Graph is empty. Seeding with initial data...");
+    /// Retrieves the most recent active version of a single concept by its ID.
+    pub async fn get_concept(&self, id: ConceptId) -> Result<Option<Concept>> {
+        let manager = Arc::clone(&self.transaction_manager);
 
-    // --- Our Sample Data Story ---
+        task::spawn_blocking(move || {
+            let now = chrono::Utc::now();
+            let version_store = manager.version_store();
 
-    // 1. Create the core concepts.
-    let mnemonic = self.store(json!({"name": "Mnemonic Computing", "type": "Project"})).await?;
-    let developer = self.store(json!({"name": "4xmafole", "type": "Person"})).await?;
-    let ui = self.store(json!({"name": "Explorer UI", "type": "Component"})).await?;
-    let backend = self.store(json!({"name": "Core Engine", "type": "Component"})).await?;
-    
-    // 2. Create the relationships to tell the story.
-    self.relate(developer, "leads".to_string(), mnemonic).await?;
-    self.relate(mnemonic, "is_composed_of".to_string(), ui).await?;
-    self.relate(mnemonic, "is_composed_of".to_string(), backend).await?;
-    self.relate(ui, "is_written_in".to_string(), self.store(json!({"name": "React", "type": "Technology"})).await?).await?;
-    self.relate(backend, "is_written_in".to_string(), self.store(json!({"name": "Rust", "type": "Technology"})).await?).await?;
-
-    tracing::info!("Seeding complete!");
-
-    Ok(())
-}
+            // Use the version store's time-travel ability.
+            if let Some(version) = version_store.get_concept_version_at_timestamp(&id, now)? {
+                // Convert the ConceptVersion back to a simple Concept for the API.
+                let concept = Concept {
+                    id: version.concept_id,
+                    data: version.data.clone(),
+                    metadata: crate::types::concept::ConceptMetadata {
+                        created_at: version.created_at,
+                        updated_at: version.created_at, // Simplification for this example
+                        version: version.version,
+                        transaction_id: version.created_by,
+                    },
+                };
+                Ok(Some(concept))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .unwrap()
+    }
 }
 
 #[cfg(test)]
